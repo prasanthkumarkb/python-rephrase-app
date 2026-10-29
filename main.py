@@ -1,180 +1,86 @@
-import os
-import sys
 import time
-import logging
-import threading
-from pathlib import Path
-from itertools import cycle
 
-from dotenv import load_dotenv
-from google import genai
-
-# ----------------------------------
-# 1. Environment Configuration
-# ----------------------------------
-
-load_dotenv()
-
-API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not API_KEY:
-    raise ValueError("GEMINI_API_KEY missing in .env")
-
-client = genai.Client(api_key=API_KEY)
-
-
-# ----------------------------------
-# 2. Logging Configuration
-# ----------------------------------
-
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-
-LOG_FILE = LOG_DIR / "app.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=("%(asctime)s | %(levelname)s | " "%(message)s"),
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+from config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    logger,
 )
 
-logger = logging.getLogger("RephraseApp")
+from cli_ui import (
+    console,
+    show_header,
+    choose_style,
+    get_input_text,
+    show_result,
+    show_error,
+    show_goodbye,
+)
 
-
-# ----------------------------------
-# 3. Loading Spinner
-# ----------------------------------
-
-
-def show_loader(stop_event):
-    spinner = cycle(["|", "/", "-", "\\"])
-
-    while not stop_event.is_set():
-        symbol = next(spinner)
-
-        print(f"\r{symbol} Rephrasing your text...", end="", flush=True)
-
-        stop_event.wait(0.1)
-
-    print("\r" + " " * 45 + "\r", end="", flush=True)
-
-
-# ----------------------------------
-# 4. Gemini Rephrase Function
-# ----------------------------------
-
-
-def rephrase_text(text, style="polite"):
-
-    logger.info("Rephrase request started | style=%s | chars=%d", style, len(text))
-
-    prompt = f"""
-    You are an English writing assistant.
-
-    Rephrase the following text in a {style} tone.
-
-    Rules:
-    - Correct grammar and spelling.
-    - Preserve the original meaning.
-    - Make the sentence clear and natural.
-    - Do not add new information.
-    - Return only the rephrased text.
-
-    Text:
-    {text}
-    """
-
-    start_time = time.perf_counter()
-
-    try:
-        response = client.models.generate_content(
-            model=os.getenv("GEMINI_MODEL"), contents=prompt
-        )
-
-        result = response.text
-
-        if not result:
-            raise ValueError("Empty response from Gemini")
-
-        elapsed = time.perf_counter() - start_time
-
-        logger.info(
-            "Rephrase successful | time=%.2fs | output_chars=%d", elapsed, len(result)
-        )
-
-        return result.strip()
-
-    except Exception:
-        elapsed = time.perf_counter() - start_time
-
-        logger.exception("Rephrase failed | time=%.2fs", elapsed)
-
-        raise
-
-
-# ----------------------------------
-# 5. Main Application
-# ----------------------------------
+from gemini_service import rephrase_text
 
 
 def main():
+    logger.info("Application started | model=%s", GEMINI_MODEL)
 
-    styles = {"1": "professional", "2": "polite", "3": "simple", "4": "formal"}
-
-    print("\n=== AI Text Rephrasing Tool ===")
-
-    logger.info("Application started")
+    if not GEMINI_API_KEY:
+        show_error("GEMINI_API_KEY is missing in .env")
+        return
 
     while True:
+        try:
+            show_header()
 
-        print("\nChoose writing style:")
-        print("1. Professional")
-        print("2. Polite")
-        print("3. Simple")
-        print("4. Formal")
-        print("0. Exit")
+            console.print(f"[dim]AI Model: " f"{GEMINI_MODEL}[/dim]\n")
 
-        choice = input("\nEnter choice: ").strip()
+            style = choose_style()
 
-        if choice == "0":
-            logger.info("Application closed")
-            print("Goodbye!")
+            if style is None:
+                show_goodbye()
+                break
+
+            text = get_input_text()
+
+            if not text:
+                show_error("Please enter some text.")
+                console.input("\n[dim]Press Enter " "to continue...[/dim]")
+                continue
+
+            start_time = time.perf_counter()
+
+            try:
+                with console.status(
+                    "[bold yellow]" "Rephrasing your text..." "[/bold yellow]",
+                    spinner="dots",
+                ):
+                    result = rephrase_text(text, style)
+
+                elapsed = time.perf_counter() - start_time
+
+                logger.info(
+                    "Request completed | " "style=%s | time=%.2fs",
+                    style,
+                    elapsed,
+                )
+
+                show_result(
+                    result,
+                    style,
+                    elapsed,
+                )
+
+            except Exception as exc:
+                logger.error("Request error: %s", exc)
+
+                show_error("Unable to rephrase the text.\n" f"Details: {exc}")
+
+            console.input("\n[dim]Press Enter " "to return to menu...[/dim]")
+
+        except (KeyboardInterrupt, EOFError):
+            console.print()
+            show_goodbye()
             break
 
-        if choice not in styles:
-            print("Invalid choice")
-            continue
-
-        text = input("\nEnter text to rephrase:\n").strip()
-
-        if not text:
-            print("Text cannot be empty")
-            continue
-
-        stop_event = threading.Event()
-
-        loader_thread = threading.Thread(
-            target=show_loader, args=(stop_event,), daemon=True
-        )
-
-        try:
-            loader_thread.start()
-
-            result = rephrase_text(text, styles[choice])
-
-            print("\n--- Rephrased Text ---")
-            print(result)
-            print("-----------------------")
-
-        except Exception as error:
-            print(f"\nError: {error}")
-
-        finally:
-            stop_event.set()
-            loader_thread.join()
+    logger.info("Application stopped")
 
 
 if __name__ == "__main__":
